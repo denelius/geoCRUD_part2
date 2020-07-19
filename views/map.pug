@@ -1,0 +1,301 @@
+extends layout.pug
+block content
+    #map
+  
+    button(type='button' id='one' class='sbtn' onclick="saveFunction()") Save
+    button(type='button' id='two' class='dbtn' onclick="deleteFunction()") Delete
+    div(class='dropdown')
+        button(type='button' class='dropbtn' onclick="dropFunction()") ID Search
+        div(id='myDropdown' class='dropdown-content')
+            each layer, i in jmap
+                a(href='#' + layer.name.substr(2) onclick="editFunction('" + layer.name + "')") #{layer.name}
+
+    script(type='text/javascript').
+
+        // set up variables for map and base layers
+        var osmUrl = 'http://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            osmAttrib = '&copy; <a href="http://openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            osm = L.tileLayer(osmUrl, { maxZoom: 18, attribution: osmAttrib }),
+            map = L.map('map', {editable: true}).setView([#{lat},#{lng}], 14),
+            drawnItems = L.featureGroup().addTo(map);
+
+        // setup base layer group toggle and draw toolbar
+        L.control.layers({
+            'osm': osm.addTo(map),
+            "google": L.tileLayer('http://www.google.cn/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z}', {
+                attribution: 'google'
+            })
+        }, { 'drawlayer': drawnItems }, { position: 'topleft', collapsed: false }).addTo(map);
+
+        // add base layer group toggle and draw toolbar to map
+        map.addControl(new L.Control.Draw({
+            edit: {
+                featureGroup: drawnItems,
+                poly: {
+                    allowIntersection: false
+                }
+            },
+            draw: {
+                polyline: {
+                    allowIntersection: false
+                },
+                marker: false,
+                circle: false,
+                polygon: false,
+                rectangle: false,
+                circlemarker: false
+            }
+        }));
+
+
+        // listener for polyline feature draw - when draw completed create new feature in mongodb
+        map.on(L.Draw.Event.CREATED, function (event) {
+            var layer = event.layer;
+
+            drawnItems.addLayer(layer);
+            //- alert("hhh");
+            //- alert(layer.toGeoJSON().geometry.coordinates);
+            
+            var putcontent = createJson(String(layer.toGeoJSON().geometry.coordinates));
+            var updateurl = "http://127.0.0.1:1234/products/create";
+            //- alert(updateurl);
+            //- //- alert(typeof putcontent);
+            //- alert(JSON.stringify(putcontent));
+            $.ajax({
+                url: updateurl,    //Your api url
+                type: 'POST',   //type is any HTTP method
+                data: JSON.stringify(putcontent),
+                headers: {
+                    'x-auth-token': localStorage.accessToken,
+                    "Content-Type": "application/json"
+                },     //Data as js object
+                success: function () {
+                    alert("great success");
+                    location.reload(true);
+                }
+            });
+        });
+            
+        // request map layers from mangodb        
+        $.getJSON('maplayers',function(result){
+            $.each(result, function(i, mlayer){
+                $.getJSON('mapjson/' + mlayer.name, function(data) { addLayer(data, mlayer.name ) });
+            });
+        });
+
+        //setup javascript objects pair holders for layers and associated ids
+        var layers = {};
+        var layerid = {};
+
+        // function called from json layer request above to add content to map
+        function addLayer(layer, name) {
+            var leaf_layer;
+            if (layer.type == "MultiPoint") {
+                leaf_layer = L.geoJson(layer, { pointToLayer: function (feature, latlng) {return L.circleMarker(latlng, layer.style); }})
+                leaf_layer.bindPopup(layer.type);
+            } else if (layer.type == "MultiLineString") {
+                leaf_layer = L.geoJson(layer, {style: layer.style });
+                leaf_layer.bindPopup(layer.type);
+            } 
+            else if (layer.type == "Feature") {
+                //alert(layer._id)
+                layerid[name] = layer._id;
+                leaf_layer = L.polyline(layer.geometry.coordinates, {style: layer.style});
+                leaf_layer.bindPopup('<p>name: ' + layer.name + '</br>direction: ' + layer.properties.direction + '</br>status: ' + layer.properties.status + '</p>');
+            } 
+            else  {
+                leaf_layer = L.geoJson(layer, {
+                    style: function(feature) {
+                        switch (feature.properties.style) {
+                        case 'Orange': return {color: "#ff0000"};
+                        case 'Blue': return {color: "#0000ff"};
+                    }
+                    },
+                    onEachFeature: function (feature, layer) {
+                         layer.bindPopup(feature.properties.name);
+                     }
+                 });
+            }
+            layers[name] = leaf_layer;
+            leaf_layer.addTo(map);
+            
+            $('#' + name).click(function(e) {
+                if (map.hasLayer(leaf_layer)) {
+                    map.removeLayer(leaf_layer);
+                } else {
+                    map.addLayer(leaf_layer);
+                }
+            });   
+        }
+
+        var editArray = []
+
+        // listener for editable javascript extension
+        map.on('editable:vertex:ctrlclick editable:vertex:metakeyclick', function (e) {
+            e.vertex.continue();
+        });
+
+        var popup = L.popup();
+
+        // simple random color function called when lines are edited
+        function getRandomColor() {
+          var letters = '0123456789ABCDEF';
+          var color = '#';
+          for (var i = 0; i < 6; i++) {
+            color += letters[Math.floor(Math.random() * 16)];
+          }
+          return color;
+        }
+
+        colcount = 0
+        map.on('editable:editing', function (e) {
+            if (colcount == 0) {
+                e.layer.setStyle({color: getRandomColor()});
+            }
+            colcount ++;
+        });
+
+        // not sure this is used
+        $.put = function(url, data, callback, type){
+            if ( $.isFunction(data) ){
+                type = type || callback,
+                callback = data,
+                data = {}
+            }
+            
+            return $.ajax({
+                url: url,
+                type: 'PUT',
+                success: callback,
+                data: data,
+                contentType: type
+            });
+        }
+
+        // called from save button - all features that have been edited are saved
+        function saveFunction() {
+            var arrayLength = editArray.length;
+            for (var i = 0; i < arrayLength; i++) {
+                var putcontent = makeJson(JSON.stringify(layers[editArray[i]].toGeoJSON().geometry.coordinates));
+                var updateurl = "http://127.0.0.1:1234/products/" + layerid[editArray[i]] + "/update";
+                $.ajax({
+                    url: updateurl,    //Your api url
+                    type: 'PUT',   //type is any HTTP method
+                    data: JSON.stringify(putcontent),
+                    headers: {
+                        'x-auth-token': localStorage.accessToken,
+                        "Content-Type": "application/json"
+                    },
+                    success: function () {
+                        alert("feature saved");
+                        location.reload(true);
+                    }
+                });
+            }
+        }
+
+        // builds json for edit/update a bit hacky buy coords returned from leaflet need to be reversed for mongo
+        function makeJson(coords) {
+            // format received from leaflet [[-70.65775,-33.44379],[-71.081543,-33.073131],[-71.61748,-33.04576]]
+            var res = coords.replace("[[", "").replace("]]", "");
+            var resd = res.split("],[");
+            var reverse = [];
+            var prejson = '{"geometry": {"coordinates": [';
+            var postjson = ']}}';
+
+            for (var i in resd) {
+                var pairsplit = resd[i].split(",");
+                reverse.push("[" + pairsplit[1] + "," + pairsplit[0] + "]")
+            }
+            var revcoords = reverse.toString();
+           
+            var fulljson = prejson + revcoords + postjson
+            return JSON.parse(fulljson);
+        }
+ 
+        // builds json for new feature create a bit hacky buy coords returned from leaflet need to be reversed for mongo
+        function createJson(coords) {
+            var res = coords.split(",");
+            var reverse = [];
+            var resd = res.reduce(function(result, value, index, array) {
+            if (index % 2 === 0)
+                result.push(array.slice(index, index + 2));
+            return result;
+            }, []);
+
+            var ranval = ranGenerator();
+            prejson = '{"type": "Feature","name": "' + ranval + '","style": {"color": "#ff46b5","weight": 10,"opacity": 0.85},"geometry": { "type": "LineString", "coordinates": [';
+            postjson = ']},"properties": {"direction": "Bidirectional","status": "good"}}';
+          
+            for (var i in resd) {
+                var pairsplit = String(resd[i]).split(",");
+                reverse.push("[" + pairsplit[1] + "," + pairsplit[0] + "]")
+            }
+
+            var revcoords = reverse.toString();
+           
+            var fulljson = prejson + revcoords + postjson
+            return JSON.parse(fulljson);
+        }
+
+        // function tracks layers that have been edited
+        var lastlayer = "";
+        function editFunction(x) {
+            colcount = 0;
+            if (lastlayer !== "") {
+                layers[lastlayer].disableEdit();
+            }
+            layers[x].enableEdit();
+            editArray.push(x);
+            lastlayer = x;
+        }
+
+        // simple function to generate random string id for layer name called from createjson function
+        function ranGenerator() {
+            var S4 = function() {
+            return (((1+Math.random())*0x10000)|0).toString(16).substring(1);
+            };
+            //return (S4()+S4()+"-"+S4()+"-"+S4()+"-"+S4()+"-"+S4()+S4()+S4());
+            return "cv" + S4()+S4();
+        }
+
+        // deletes feature based on selected feature and delete button click
+        function deleteFunction() {
+            if (lastlayer == ""){
+                alert('Please select a feature by clicking on its ID in the ID Search dropdown');
+                return;
+            }
+            if (confirm('Are you sure you want to delete feature: ' + lastlayer + ' : ' + layerid[lastlayer] + '?')) {
+                var deleteurl = "http://127.0.0.1:1234/products/" + layerid[lastlayer] + "/delete";
+                $.ajax({
+                    url: deleteurl,
+                    type: 'DELETE',
+                    success: function(result) {
+                         alert("feature has been deleted");
+                         location.reload(true);
+                    }
+                });
+            } else {
+                alert("nothing");
+            }
+        }
+
+        // when the user clicks on the button, toggle between hiding and showing the dropdown content
+        function dropFunction() {
+            document.getElementById("myDropdown").classList.toggle("show");
+        }
+
+        // close the dropdown if the user clicks outside of it
+        window.onclick = function(event) {
+          if (!event.target.matches('.dropbtn')) {
+
+            var dropdowns = document.getElementsByClassName("dropdown-content");
+            var i;
+            for (i = 0; i < dropdowns.length; i++) {
+              var openDropdown = dropdowns[i];
+              if (openDropdown.classList.contains('show')) {
+                openDropdown.classList.remove('show');
+              }
+            }
+          }
+        }
